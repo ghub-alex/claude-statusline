@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code status line: model, directory/git branch, context usage, plan rate limits."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -64,8 +65,11 @@ def format_resets_at(epoch_sec):
 def git_info(cwd, session_id):
     cache_file = Path(tempfile.gettempdir()) / f"statusline-git-{session_id}"
     if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < CACHE_MAX_AGE_SEC:
-        branch, staged, modified = cache_file.read_text().split("|")
-        return branch, int(staged), int(modified)
+        try:
+            branch, staged, modified = cache_file.read_text().split("|")
+            return branch, int(staged), int(modified)
+        except ValueError:
+            pass  # cache file was read mid-write by a concurrent invocation; recompute
 
     branch, staged, modified = "", 0, 0
     try:
@@ -90,7 +94,9 @@ def git_info(cwd, session_id):
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    cache_file.write_text(f"{branch}|{staged}|{modified}")
+    tmp_file = cache_file.with_suffix(f".{os.getpid()}.tmp")
+    tmp_file.write_text(f"{branch}|{staged}|{modified}")
+    tmp_file.replace(cache_file)
     return branch, staged, modified
 
 
@@ -167,11 +173,13 @@ def main():
         print("statusline: invalid input")
         return
 
-    model = data.get("model", {}).get("display_name", "?")
-    parts = [f"{COLORS['cyan']}[{model}]{GRAY}", render_location(data)]
-    parts.extend(render_segments(data))
-
-    print(GRAY + " | ".join(parts) + RESET)
+    try:
+        model = data.get("model", {}).get("display_name", "?")
+        parts = [f"{COLORS['cyan']}[{model}]{GRAY}", render_location(data)]
+        parts.extend(render_segments(data))
+        print(GRAY + " | ".join(parts) + RESET)
+    except Exception as e:
+        print(f"statusline: error ({e})")
 
 
 if __name__ == "__main__":
