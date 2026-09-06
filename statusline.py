@@ -6,10 +6,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 CACHE_MAX_AGE_SEC = 5
 BAR_WIDTH = 10
+PEAK_TZ = ZoneInfo("America/New_York")
+PEAK_START_HOUR = 8
+PEAK_END_HOUR = 14
 
 RESET = "\033[0m"
 GRAY = "\033[38;2;153;153;153m"
@@ -47,19 +52,34 @@ def bar(pct, color):
     return f"{color}{'▓' * filled}{GRAY}{'░' * (BAR_WIDTH - filled)}"
 
 
+def format_duration(delta_sec):
+    hours, rem = divmod(int(delta_sec), 3600)
+    minutes = rem // 60
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
 def format_resets_at(epoch_sec):
     if epoch_sec is None:
         return None
     delta = epoch_sec - time.time()
     if delta <= 0:
         return "now"
-    hours, rem = divmod(int(delta), 3600)
-    minutes = rem // 60
+    hours = int(delta) // 3600
     if hours >= 24:
         return time.strftime("%a %H:%M", time.localtime(epoch_sec))
-    if hours > 0:
-        return f"{hours}h{minutes:02d}m"
-    return f"{minutes}m"
+    return format_duration(delta)
+
+
+def peak_hours_status():
+    now = datetime.now(PEAK_TZ)
+    start = now.replace(hour=PEAK_START_HOUR, minute=0, second=0, microsecond=0)
+    end = now.replace(hour=PEAK_END_HOUR, minute=0, second=0, microsecond=0)
+    if start <= now < end:
+        return f"{COLORS['blue']}Peak Hours{GRAY} (ends {format_duration((end - now).total_seconds())})"
+    next_start = start if now < start else start + timedelta(days=1)
+    return f"{COLORS['blue']}Off Peak{GRAY} (starts {format_duration((next_start - now).total_seconds())})"
 
 
 def git_info(cwd, session_id):
@@ -100,6 +120,36 @@ def git_info(cwd, session_id):
     return branch, staged, modified
 
 
+def cached_rate_limits(session_id, rate_limits):
+    cache_file = Path(tempfile.gettempdir()) / f"statusline-ratelimits-{session_id}"
+    five_hour = rate_limits.get("five_hour") or {}
+    seven_day = rate_limits.get("seven_day") or {}
+
+    five_pct = five_hour.get("used_percentage")
+    five_resets = five_hour.get("resets_at")
+    week_pct = seven_day.get("used_percentage")
+    week_resets = seven_day.get("resets_at")
+    fresh = five_pct is not None or week_pct is not None
+
+    if not fresh and cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text())
+            five_pct, five_resets = cached.get("five_pct"), cached.get("five_resets")
+            week_pct, week_resets = cached.get("week_pct"), cached.get("week_resets")
+        except (ValueError, OSError):
+            pass  # cache file missing/corrupt or read mid-write; fall back to placeholder
+
+    if fresh:
+        tmp_file = cache_file.with_suffix(f".{os.getpid()}.tmp")
+        tmp_file.write_text(json.dumps({
+            "five_pct": five_pct, "five_resets": five_resets,
+            "week_pct": week_pct, "week_resets": week_resets,
+        }))
+        tmp_file.replace(cache_file)
+
+    return five_pct, five_resets, week_pct, week_resets
+
+
 def render_location(data):
     cwd = data.get("workspace", {}).get("current_dir") or data.get("cwd", "")
     dirname = Path(cwd).name or cwd
@@ -133,35 +183,28 @@ def render_segments(data):
         segments.append(f"ctx {bar(pct, color)}{color} {pct}%{GRAY} ({used}/{limit})")
 
     rate_limits = data.get("rate_limits") or {}
-    five_hour = rate_limits.get("five_hour") or {}
-    seven_day = rate_limits.get("seven_day") or {}
+    session_id = data.get("session_id", "no-session")
+    five_pct, five_resets, week_pct, week_resets = cached_rate_limits(session_id, rate_limits)
 
-    five_pct = five_hour.get("used_percentage")
     if five_pct is None:
         segments.append(f"5h {bar(0, GRAY)} --%")
     else:
         pct = int(five_pct)
         color = color_for_pct(pct)
-        reset_str = format_resets_at(five_hour.get("resets_at"))
+        reset_str = format_resets_at(five_resets)
         suffix = f" (resets {reset_str})" if reset_str else ""
         segments.append(f"5h {bar(pct, color)}{color} {pct}%{GRAY}{suffix}")
 
-    week_pct = seven_day.get("used_percentage")
     if week_pct is None:
         segments.append(f"7d {bar(0, GRAY)} --%")
     else:
         pct = int(week_pct)
         color = color_for_pct(pct)
-        reset_str = format_resets_at(seven_day.get("resets_at"))
+        reset_str = format_resets_at(week_resets)
         suffix = f" (resets {reset_str})" if reset_str else ""
         segments.append(f"7d {bar(pct, color)}{color} {pct}%{GRAY}{suffix}")
 
-    saved_tokens = context_window.get("total_input_tokens")
-    if saved_tokens:
-        segments.append(
-            f"{GRAY}new task? {COLORS['blue']}/clear{GRAY} to save "
-            f"{COLORS['blue']}{format_tokens(saved_tokens)}{GRAY} tokens"
-        )
+    segments.append(peak_hours_status())
 
     return segments
 
