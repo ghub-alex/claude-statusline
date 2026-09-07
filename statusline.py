@@ -74,12 +74,31 @@ def format_resets_at(epoch_sec):
 
 def peak_hours_status():
     now = datetime.now(PEAK_TZ)
+    
+    # Peak hours only exist on weekdays (Mon=0 … Fri=4)
+    is_weekday = now.weekday() < 5
+    
     start = now.replace(hour=PEAK_START_HOUR, minute=0, second=0, microsecond=0)
     end = now.replace(hour=PEAK_END_HOUR, minute=0, second=0, microsecond=0)
-    if start <= now < end:
-        return f"{COLORS['blue']}Peak Hours{GRAY} (ends {format_duration((end - now).total_seconds())})"
-    next_start = start if now < start else start + timedelta(days=1)
-    return f"{COLORS['blue']}Off Peak{GRAY} (starts {format_duration((next_start - now).total_seconds())})"
+    
+    # Currently in peak hours?
+    if is_weekday and start <= now < end:
+        remaining = (end - now).total_seconds()
+        return f"{COLORS['blue']}Peak Hours{GRAY} (ends {format_duration(remaining)})"
+    
+    # Find the next peak start
+    if is_weekday and now < start:
+        # Still before today's peak
+        next_start = start
+    else:
+        # After today's peak (or weekend) → go to the next weekday's peak
+        next_start = start + timedelta(days=1)
+        # Skip Saturday/Sunday
+        while next_start.weekday() >= 5:
+            next_start += timedelta(days=1)
+    
+    remaining = (next_start - now).total_seconds()
+    return f"{COLORS['blue']}Off Peak{GRAY} (ends {format_duration(remaining)})"
 
 
 def git_info(cwd, session_id):
